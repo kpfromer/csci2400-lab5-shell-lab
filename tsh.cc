@@ -1,7 +1,7 @@
-// 
+//
 // tsh - A tiny shell program with job control
-// 
-// <Put your name and login ID here>
+//
+// Kyle Pfromer kypf2522
 //
 
 using namespace std;
@@ -16,7 +16,6 @@ using namespace std;
 #include <sys/wait.h>
 #include <errno.h>
 #include <string>
-
 #include "globals.h"
 #include "jobs.h"
 #include "helper-routines.h"
@@ -28,6 +27,11 @@ using namespace std;
 static char prompt[] = "tsh> ";
 int verbose = 0;
 
+// volatile pid_t foreground_process;
+// volatile int program_count = 0;
+// volatile std::set<pid_t> program_processes;
+// volatile std::set<pid_t> jobs_processes;
+
 //
 // You need to implement the functions eval, builtin_cmd, do_bgfg,
 // waitfg, sigchld_handler, sigstp_handler, sigint_handler
@@ -35,7 +39,7 @@ int verbose = 0;
 // The code below provides the "prototypes" for those functions
 // so that earlier code can refer to them. You need to fill in the
 // function bodies below.
-// 
+//
 
 void eval(char *cmdline);
 int builtin_cmd(char **argv);
@@ -47,9 +51,9 @@ void sigtstp_handler(int sig);
 void sigint_handler(int sig);
 
 //
-// main - The shell's main routine 
+// main - The shell's main routine
 //
-int main(int argc, char *argv[]) 
+int main(int argc, char *argv[])
 {
   int emit_prompt = 1; // emit prompt (default)
 
@@ -61,16 +65,18 @@ int main(int argc, char *argv[])
 
   /* Parse the command line */
   char c;
-  while ((c = getopt(argc, argv, "hvp")) != EOF) {
-    switch (c) {
-    case 'h':             // print help message
+  while ((c = getopt(argc, argv, "hvp")) != EOF)
+  {
+    switch (c)
+    {
+    case 'h': // print help message
       usage();
       break;
-    case 'v':             // emit additional diagnostic info
+    case 'v': // emit additional diagnostic info
       verbose = 1;
       break;
-    case 'p':             // don't print a prompt
-      emit_prompt = 0;  // handy for automatic testing
+    case 'p':          // don't print a prompt
+      emit_prompt = 0; // handy for automatic testing
       break;
     default:
       usage();
@@ -84,14 +90,14 @@ int main(int argc, char *argv[])
   //
   // These are the ones you will need to implement
   //
-  Signal(SIGINT,  sigint_handler);   // ctrl-c
-  Signal(SIGTSTP, sigtstp_handler);  // ctrl-z
-  Signal(SIGCHLD, sigchld_handler);  // Terminated or stopped child
+  Signal(SIGINT, sigint_handler);   // ctrl-c
+  Signal(SIGTSTP, sigtstp_handler); // ctrl-z
+  Signal(SIGCHLD, sigchld_handler); // Terminated or stopped child
 
   //
   // This one provides a clean way to kill the shell
   //
-  Signal(SIGQUIT, sigquit_handler); 
+  Signal(SIGQUIT, sigquit_handler);
 
   //
   // Initialize the job list
@@ -101,24 +107,28 @@ int main(int argc, char *argv[])
   //
   // Execute the shell's read/eval loop
   //
-  for(;;) {
+  for (;;)
+  {
     //
     // Read command line
     //
-    if (emit_prompt) {
+    if (emit_prompt)
+    {
       printf("%s", prompt);
       fflush(stdout);
     }
 
     char cmdline[MAXLINE];
 
-    if ((fgets(cmdline, MAXLINE, stdin) == NULL) && ferror(stdin)) {
+    if ((fgets(cmdline, MAXLINE, stdin) == NULL) && ferror(stdin))
+    {
       app_error("fgets error");
     }
     //
     // End of file? (did user type ctrl-d?)
     //
-    if (feof(stdin)) {
+    if (feof(stdin))
+    {
       fflush(stdout);
       exit(0);
     }
@@ -129,15 +139,20 @@ int main(int argc, char *argv[])
     eval(cmdline);
     fflush(stdout);
     fflush(stdout);
-  } 
+  }
 
   exit(0); //control never reaches here
 }
-  
+
+void print_job(pid_t pid, char *command)
+{
+  printf("[%d] (%d) %s", pid2jid(pid), pid, command);
+}
+
 /////////////////////////////////////////////////////////////////////////////
 //
 // eval - Evaluate the command line that the user has just typed in
-// 
+//
 // If the user has requested a built-in command (quit, jobs, bg or fg)
 // then execute it immediately. Otherwise, fork a child process and
 // run the job in the context of the child. If the job is running in
@@ -146,7 +161,7 @@ int main(int argc, char *argv[])
 // background children don't receive SIGINT (SIGTSTP) from the kernel
 // when we type ctrl-c (ctrl-z) at the keyboard.
 //
-void eval(char *cmdline) 
+void eval(char *cmdline)
 {
   /* Parse command line */
   //
@@ -161,58 +176,126 @@ void eval(char *cmdline)
   // The 'bg' variable is TRUE if the job should run
   // in background mode or FALSE if it should run in FG
   //
-  int bg = parseline(cmdline, argv); 
-  if (argv[0] == NULL)  
-    return;   /* ignore empty lines */
+  int response;
+  int bg = parseline(cmdline, argv);
+  if (argv[0] == NULL)
+    return; /* ignore empty lines */
 
+  if (!builtin_cmd(argv))
+  {
+    // temporarily block signal (receiving signals at 9:47)
+    sigset_t mask_all, mask_child, prev_mask;
+    pid_t pid;
+    // todo: signal handling
+    sigfillset(&mask_all);
+    sigaddset(&mask_child, SIGCHLD);
+
+    // Block SIGCHLD and save previous blocked set
+    sigprocmask(SIG_BLOCK, &mask_child, &prev_mask);
+    if ((pid = fork()) == 0)
+    {
+      // Restore SIGCHLD for the child
+      sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+      execve(argv[0], argv, NULL);
+    }
+    else
+    {
+      if (bg)
+      {
+        // Block ALL signals
+        sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        addjob(jobs, pid, BG, cmdline);
+        // Restore previous blocked set, unblocking SIGINT, SIGCHLD, SIGTSTP
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+        print_job(pid, cmdline);
+      }
+      else
+      {
+        // Block ALL signals for the parent
+        sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        // add jobs to jobs list
+        addjob(jobs, pid, FG, cmdline);
+        // Restore previous blocked set, unblocking ALL signals for the parent
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+        // wait for the job to finish
+        waitfg(pid);
+      }
+    }
+  }
   return;
 }
 
+// https://stackoverflow.com/questions/20032154/the-difference-between-execv-and-execve
+// reap all terminated children: put wait in a loop (receiving signals minute: 19:41)
+// temp block signal receiving signals at 11:14
 
 /////////////////////////////////////////////////////////////////////////////
 //
 // builtin_cmd - If the user has typed a built-in command then execute
 // it immediately. The command name would be in argv[0] and
 // is a C string. We've cast this to a C++ string type to simplify
-// string comparisons; however, the do_bgfg routine will need 
+// string comparisons; however, the do_bgfg routine will need
 // to use the argv array as well to look for a job number.
 //
-int builtin_cmd(char **argv) 
+int builtin_cmd(char **argv)
 {
   string cmd(argv[0]);
-  return 0;     /* not a builtin command */
+  if (strcmp(argv[0], "quit") == 0)
+    exit(0);
+  else if (strcmp(argv[0], "fg") == 0)
+  {
+    do_bgfg(argv);
+    return 1;
+  }
+  else if (strcmp(argv[0], "bg") == 0)
+  {
+    do_bgfg(argv);
+    return 1;
+  }
+  else if (strcmp(argv[0], "jobs") == 0)
+  { // lists background jobs
+    listjobs(jobs);
+    return 1;
+  }
+  return 0; /* not a builtin command */
 }
 
 /////////////////////////////////////////////////////////////////////////////
 //
 // do_bgfg - Execute the builtin bg and fg commands
 //
-void do_bgfg(char **argv) 
+void do_bgfg(char **argv)
 {
-  struct job_t *jobp=NULL;
-    
+  struct job_t *jobp = NULL;
+
   /* Ignore command if no argument */
-  if (argv[1] == NULL) {
+  if (argv[1] == NULL)
+  {
     printf("%s command requires PID or %%jobid argument\n", argv[0]);
     return;
   }
-    
+
   /* Parse the required PID or %JID arg */
-  if (isdigit(argv[1][0])) {
+  if (isdigit(argv[1][0]))
+  {
     pid_t pid = atoi(argv[1]);
-    if (!(jobp = getjobpid(jobs, pid))) {
+    if (!(jobp = getjobpid(jobs, pid)))
+    {
       printf("(%d): No such process\n", pid);
       return;
     }
   }
-  else if (argv[1][0] == '%') {
+  else if (argv[1][0] == '%')
+  {
     int jid = atoi(&argv[1][1]);
-    if (!(jobp = getjobjid(jobs, jid))) {
+    if (!(jobp = getjobjid(jobs, jid)))
+    {
       printf("%s: No such job\n", argv[1]);
       return;
     }
-  }	    
-  else {
+  }
+  else
+  {
     printf("%s: argument must be a PID or %%jobid\n", argv[0]);
     return;
   }
@@ -228,6 +311,27 @@ void do_bgfg(char **argv)
   //
   string cmd(argv[0]);
 
+  if (cmd == "fg") // can run on suspended processes and background processes
+  {
+    pid_t pid = jobp->pid;
+    if (jobp->state == ST)
+    {
+      // start up the process
+      kill(-pid, SIGCONT);
+    }
+    jobp->state = FG;
+    waitfg(pid);
+  }
+  else
+  { // only runs on suspended processes
+    // say running in background
+    jobp->state = BG;
+    // start up process (group) again with SIGCONT
+    pid_t pid = jobp->pid;
+    kill(-pid, SIGCONT);
+    print_job(pid, jobp->cmdline);
+  }
+
   return;
 }
 
@@ -237,6 +341,26 @@ void do_bgfg(char **argv)
 //
 void waitfg(pid_t pid)
 {
+  // wait specifically for pid to end (not other pids)
+  // "The  wait() system call suspends execution of the calling process until one of its children terminates."
+  // http://gnu.wiki/man2/wait.2.php
+
+  // program_processes.insert(pid);
+
+  // wait for foreground jobs list to finish execution
+  // WUNTRACED = wait until A process in the wait set becomes either terminated or stopped. Return the PID of the child
+  waitpid(pid, NULL, WUNTRACED);
+
+  // if job is still running in foreground and done then remove it from the jobs list
+  if (getjobpid(jobs, pid)->state == FG)
+  {
+    deletejob(jobs, pid);
+  }
+
+  // wait(NULL);
+
+  // program_processes.erase(pid);
+
   return;
 }
 
@@ -245,6 +369,7 @@ void waitfg(pid_t pid)
 // Signal handlers
 //
 
+// follow safe signal handler guidelines (receiving signals at 12:51)
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -252,9 +377,9 @@ void waitfg(pid_t pid)
 //     a child job terminates (becomes a zombie), or stops because it
 //     received a SIGSTOP or SIGTSTP signal. The handler reaps all
 //     available zombie children, but doesn't wait for any other
-//     currently running children to terminate.  
+//     currently running children to terminate.
 //
-void sigchld_handler(int sig) 
+void sigchld_handler(int sig)
 {
   return;
 }
@@ -263,10 +388,18 @@ void sigchld_handler(int sig)
 //
 // sigint_handler - The kernel sends a SIGINT to the shell whenver the
 //    user types ctrl-c at the keyboard.  Catch it and send it along
-//    to the foreground job.  
+//    to the foreground job.
 //
-void sigint_handler(int sig) 
+void sigint_handler(int sig)
 {
+  // send signal to foreground process using the kill command (misnomer)
+  pid_t fpid = fgpid(jobs);
+  if (fpid != 0)
+  {
+    kill(-fpid, SIGINT);
+    // print out
+    printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(fpid), fpid, sig);
+  }
   return;
 }
 
@@ -274,17 +407,26 @@ void sigint_handler(int sig)
 //
 // sigtstp_handler - The kernel sends a SIGTSTP to the shell whenever
 //     the user types ctrl-z at the keyboard. Catch it and suspend the
-//     foreground job by sending it a SIGTSTP.  
+//     foreground job by sending it a SIGTSTP.
 //
-void sigtstp_handler(int sig) 
+void sigtstp_handler(int sig)
 {
+  // send signal to foreground process using the kill command (misnomer)
+  // todo: send to foreground_process group
+  // kill(-foreground_process, SIGTSTP);
+
+  // send signal to foreground process using the kill command (misnomer)
+  pid_t fpid = fgpid(jobs);
+  if (fpid != 0)
+  {
+    kill(-fpid, SIGTSTP);
+    // print out
+    printf("Job [%d] (%d) stopped by signal %d\n", pid2jid(fpid), fpid, sig);
+    getjobpid(jobs, fpid)->state = ST;
+  }
   return;
 }
 
 /*********************
  * End signal handlers
  *********************/
-
-
-
-
