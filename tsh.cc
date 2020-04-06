@@ -176,7 +176,6 @@ void eval(char *cmdline)
   // The 'bg' variable is TRUE if the job should run
   // in background mode or FALSE if it should run in FG
   //
-  int response;
   int bg = parseline(cmdline, argv);
   if (argv[0] == NULL)
     return; /* ignore empty lines */
@@ -194,6 +193,7 @@ void eval(char *cmdline)
     sigprocmask(SIG_BLOCK, &mask_child, &prev_mask);
     if ((pid = fork()) == 0)
     {
+      setpgid(0, 0);
       // Restore SIGCHLD for the child
       sigprocmask(SIG_SETMASK, &prev_mask, NULL);
       execve(argv[0], argv, NULL);
@@ -203,7 +203,7 @@ void eval(char *cmdline)
       if (bg)
       {
         // Block ALL signals
-        sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        // sigprocmask(SIG_BLOCK, &mask_all, NULL);
         addjob(jobs, pid, BG, cmdline);
         // Restore previous blocked set, unblocking SIGINT, SIGCHLD, SIGTSTP
         sigprocmask(SIG_SETMASK, &prev_mask, NULL);
@@ -212,7 +212,7 @@ void eval(char *cmdline)
       else
       {
         // Block ALL signals for the parent
-        sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        // sigprocmask(SIG_BLOCK, &mask_all, NULL);
         // add jobs to jobs list
         addjob(jobs, pid, FG, cmdline);
         // Restore previous blocked set, unblocking ALL signals for the parent
@@ -341,25 +341,19 @@ void do_bgfg(char **argv)
 //
 void waitfg(pid_t pid)
 {
-  // wait specifically for pid to end (not other pids)
-  // "The  wait() system call suspends execution of the calling process until one of its children terminates."
-  // http://gnu.wiki/man2/wait.2.php
 
-  // program_processes.insert(pid);
-
-  // wait for foreground jobs list to finish execution
-  // WUNTRACED = wait until A process in the wait set becomes either terminated or stopped. Return the PID of the child
-  waitpid(pid, NULL, WUNTRACED);
-
-  // if job is still running in foreground and done then remove it from the jobs list
-  if (getjobpid(jobs, pid)->state == FG)
+  // catch if the pid is nothing or if it is not the foreground tasks
+  if (pid == 0 || pid != fgpid(jobs))
   {
-    deletejob(jobs, pid);
+    return;
   }
 
-  // wait(NULL);
-
-  // program_processes.erase(pid);
+  // while there is still a foreground task
+  while (fgpid(jobs))
+  {
+    // wait a bit
+    sleep(1);
+  }
 
   return;
 }
@@ -381,6 +375,46 @@ void waitfg(pid_t pid)
 //
 void sigchld_handler(int sig)
 {
+  // pid_t pid;
+  // while ((pid = waitpid(-1,)))
+
+  // use waitpid to wait for waiting for specific group?
+  // waitpid(-);
+
+  pid_t pid;
+  int status;
+  struct job_t *job;
+
+  // reap terminated processes and handle stopped processes (WNOHANG = return 0 if they have not be terminated yet)
+  while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0)
+  {
+    // reap terminated processes
+    if (WIFEXITED(status))
+    { // terminated properly via exit / return
+      deletejob(jobs, pid);
+    }
+    else if (WIFSIGNALED(status))
+    { // uncaught signal
+      job = getjobpid(jobs, pid);
+      printf("Job [%d] (%d) terminated by signal %d\n", job->jid, pid, WTERMSIG(status));
+      deletejob(jobs, pid);
+    }
+    // handle stopped processes
+    else if (WIFSTOPPED(status))
+    {
+      job = getjobpid(jobs, pid);
+      job->state = ST;
+      printf("Job [%d] (%d) stopped by signal %d\n", job->jid, pid, WSTOPSIG(status));
+    }
+  }
+
+  // check for errors (not no child error)
+  if (pid < 0 && errno != ECHILD)
+  {
+    printf("waitpid error");
+    exit(-1);
+  }
+
   return;
 }
 
@@ -395,11 +429,8 @@ void sigint_handler(int sig)
   // send signal to foreground process using the kill command (misnomer)
   pid_t fpid = fgpid(jobs);
   if (fpid != 0)
-  {
     kill(-fpid, SIGINT);
-    // print out
-    printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(fpid), fpid, sig);
-  }
+
   return;
 }
 
@@ -418,12 +449,8 @@ void sigtstp_handler(int sig)
   // send signal to foreground process using the kill command (misnomer)
   pid_t fpid = fgpid(jobs);
   if (fpid != 0)
-  {
     kill(-fpid, SIGTSTP);
-    // print out
-    printf("Job [%d] (%d) stopped by signal %d\n", pid2jid(fpid), fpid, sig);
-    getjobpid(jobs, fpid)->state = ST;
-  }
+
   return;
 }
 
