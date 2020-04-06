@@ -2,6 +2,7 @@
 // tsh - A tiny shell program with job control
 //
 // Kyle Pfromer kypf2522
+// I also worked with Saurabh Totey!
 //
 
 using namespace std;
@@ -196,7 +197,12 @@ void eval(char *cmdline)
       setpgid(0, 0);
       // Restore SIGCHLD for the child
       sigprocmask(SIG_SETMASK, &prev_mask, NULL);
-      execve(argv[0], argv, NULL);
+      // http://man7.org/linux/man-pages/man2/execve.2.html
+      if (execve(argv[0], argv, NULL) < 0)
+      { // execve returns -1 on error and sets errno (assumes that program is not found)
+        printf("%s: Command not found\n", argv[0]);
+        exit(0);
+      }
     }
     else
     {
@@ -412,7 +418,7 @@ void sigchld_handler(int sig)
   if (pid < 0 && errno != ECHILD)
   {
     printf("waitpid error");
-    exit(-1);
+    exit(1); // better exit code?
   }
 
   return;
